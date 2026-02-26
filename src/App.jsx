@@ -572,8 +572,7 @@ function BudgetGenerator({ytdCircs}) {
       ["Books + DIF Supp.",totalAllocatable],["Digital",digitalTotal],["Periodicals",periodicalsTotal],
       ["Total Materials Budget",totalAllocatable+digitalTotal+periodicalsTotal],
     ];
-    const csv=rows.map(r=>r.map(c=>`"${c}"`).join(",")).join("
-");
+    const csv=rows.map(r=>r.map(c=>'"'+String(c??'')+'"').join(',')).join('\n');
     const blob=new Blob([csv],{type:"text/csv"});
     const url=URL.createObjectURL(blob);
     const a=document.createElement("a");a.href=url;a.download=`${fyLabel}_CollectionsBudgetAllocations.csv`;a.click();
@@ -676,8 +675,7 @@ function BudgetGenerator({ytdCircs}) {
 // ─── Admin Upload ─────────────────────────────────────────────────────────────
 function AdminUpload({onFundsUpdate,onLastMonthUpdate,onYtdUpdate,onUpdateTimestamp}) {
   const parseCSV=(text)=>{
-    const lines=text.trim().split("
-");
+    const lines=text.trim().split("\n")
     const headers=lines[0].split(",").map(h=>h.trim().replace(/"/g,""));
     return lines.slice(1).map(line=>{
       const vals=line.split(",").map(v=>v.trim().replace(/"/g,""));
@@ -721,8 +719,7 @@ function AdminUpload({onFundsUpdate,onLastMonthUpdate,onYtdUpdate,onUpdateTimest
             const reader=new FileReader();
             reader.onload=(e)=>{
               try{
-                const lines=e.target.result.trim().split("
-");
+                const lines=e.target.result.trim().split("\n")
                 const parsed=[];
                 for(let i=4;i<lines.length;i++){
                   const vals=lines[i].split(",").map(v=>v.trim().replace(/"/g,""));
@@ -745,8 +742,7 @@ function AdminUpload({onFundsUpdate,onLastMonthUpdate,onYtdUpdate,onUpdateTimest
             const reader=new FileReader();
             reader.onload=(e)=>{
               try{
-                const lines=e.target.result.trim().split("
-");
+                const lines=e.target.result.trim().split("\n")
                 const parsed=[];
                 for(let i=4;i<lines.length;i++){
                   const vals=lines[i].split(",").map(v=>v.trim().replace(/"/g,""));
