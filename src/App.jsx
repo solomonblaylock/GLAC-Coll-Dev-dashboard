@@ -675,8 +675,7 @@ function BudgetGenerator({ytdCircs}) {
 // ─── Admin Upload ─────────────────────────────────────────────────────────────
 // ─── Google Sheets config ─────────────────────────────────────────────────────
 const SHEET_ID = "1eNhrEEFofx95O4_Cyo8nHgDNkZFxMl5ZPwGRsFB_8OE";
-const SHEET_URL = (tab) =>
-  `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tab)}`;
+const SHEET_URL = (tab) => `/.netlify/functions/sheets?tab=${encodeURIComponent(tab)}`;
 
 async function fetchSheet(tabName) {
   const res = await fetch(SHEET_URL(tabName));
