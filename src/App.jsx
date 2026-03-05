@@ -673,107 +673,148 @@ function BudgetGenerator({ytdCircs}) {
 }
 
 // ─── Admin Upload ─────────────────────────────────────────────────────────────
-function AdminUpload({onFundsUpdate,onLastMonthUpdate,onYtdUpdate,onUpdateTimestamp}) {
-  const parseCSV=(text)=>{
-    const lines=text.trim().split("\n")
-    const headers=lines[0].split(",").map(h=>h.trim().replace(/"/g,""));
-    return lines.slice(1).map(line=>{
-      const vals=line.split(",").map(v=>v.trim().replace(/"/g,""));
-      const obj={};
-      headers.forEach((h,i)=>{obj[h]=vals[i]||"";});
-      return obj;
-    });
-  };
+// ─── Google Sheets config ─────────────────────────────────────────────────────
+const SHEET_ID = "1eNhrEEFofx95O4_Cyo8nHgDNkZFxMl5ZPwGRsFB_8OE";
+const SHEET_URL = (tab) =>
+  `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tab)}`;
+
+async function fetchSheet(tabName) {
+  const res = await fetch(SHEET_URL(tabName));
+  if (!res.ok) throw new Error(`Failed to fetch sheet "${tabName}": ${res.status}`);
+  return res.text();
+}
+
+function parseSheetCSV(text) {
+  const lines = text.trim().split("\n");
+  if (lines.length < 2) return [];
+  const headers = lines[0].split(",").map(h => h.trim().replace(/^"|"$/g, ""));
+  return lines.slice(1).map(line => {
+    // Handle quoted fields with commas inside
+    const vals = [];
+    let cur = "", inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') { inQ = !inQ; }
+      else if (ch === "," && !inQ) { vals.push(cur.trim()); cur = ""; }
+      else { cur += ch; }
+    }
+    vals.push(cur.trim());
+    const obj = {};
+    headers.forEach((h, i) => { obj[h] = (vals[i] || "").replace(/^"|"$/g, ""); });
+    return obj;
+  });
+}
+
+function parseFunds(rows) {
+  const getBranch = (loc) => { for (const b of BRANCHES) { if (loc.startsWith(b)) return b; } return "External Borrowers"; };
+  return rows
+    .filter(r => r["Fund Name"] && r["Fund Name"].toLowerCase() !== "totals" && r["Fund Name"].toLowerCase() !== "fund name")
+    .map(r => ({
+      name: r["Fund Name"]?.trim(),
+      code: r["Fund Code"]?.trim(),
+      appropriation: parseFloat((r["Appropriation"] || "").replace(/[$,]/g, "")) || 0,
+      expenditure: parseFloat((r["Expenditure"] || "").replace(/[$,]/g, "")) || 0,
+      encumbrance: parseFloat((r["Encumbrance"] || "").replace(/[$,]/g, "")) || 0,
+      freeBalance: parseFloat((r["Free Balance"] || "").replace(/[$,]/g, "")) || 0,
+    }));
+}
+
+function parseCircsLast(rows) {
+  const getBranch = (loc) => { for (const b of BRANCHES) { if (loc.startsWith(b)) return b; } return "External Borrowers"; };
+  return rows
+    .filter(r => r["Location"] && r["Location"].toLowerCase() !== "location")
+    .map(r => ({
+      location: r["Location"]?.trim(),
+      branch: r["Branch"]?.trim() || getBranch(r["Location"]?.trim() || ""),
+      pct: parseFloat(r["Percent"]) || 0,
+      qty: parseInt(r["Qty"]) || 0,
+      changePrevYr: parseFloat(r["Change Prev Year"]) || 0,
+      changePrevMo: parseFloat(r["Change Prev Month"]) || 0,
+      prevYrQty: parseInt(r["Prev Year Qty"]) || 0,
+      prevMoQty: parseInt(r["Prev Month Qty"]) || 0,
+    }));
+}
+
+function parseCircsYTD(rows) {
+  const getBranch = (loc) => { for (const b of BRANCHES) { if (loc.startsWith(b)) return b; } return "External Borrowers"; };
+  return rows
+    .filter(r => r["Location"] && r["Location"].toLowerCase() !== "location")
+    .map(r => ({
+      location: r["Location"]?.trim(),
+      branch: r["Branch"]?.trim() || getBranch(r["Location"]?.trim() || ""),
+      pct: parseFloat(r["Percent"]) || 0,
+      qty: parseInt(r["Qty"]) || 0,
+    }));
+}
+
+// ─── Data Management tab ──────────────────────────────────────────────────────
+function DataManagement({ onRefresh, loading, lastUpdated, sheetUrl }) {
+  const fmtDate = (d) => d ? d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit" }) : null;
+
+  const steps = [
+    { step: "1", title: "Open the Google Sheet", desc: "Click the button below to open the data sheet. This is where all dashboard data lives." },
+    { step: "2", title: "Monthly Fund Update", desc: "In the Funds tab, replace the existing data rows with a fresh export from Sierra. Keep the header row (row 1) exactly as-is." },
+    { step: "3", title: "Monthly Circs Update", desc: "In the Circs_LastMonth and Circs_YTD tabs, replace the data rows with fresh Sierra exports. Column order must match the headers in row 1." },
+    { step: "4", title: "Refresh the Dashboard", desc: "Once the Sheet is updated, click the Refresh Data button below. All visitors will immediately see the new data." },
+  ];
 
   return (
     <div>
-      <SectionHeader title="Data Management" sub="Upload updated monthly files to refresh the dashboard"/>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:20,marginBottom:24}}>
-        <div style={card}>
-          <div style={{fontSize:13,fontWeight:600,color:TEXT,marginBottom:4}}>Fund Balances</div>
-          <div style={{fontSize:11,color:MUTED,marginBottom:14}}>Upload updated <code style={{background:BORDER,padding:"1px 4px",borderRadius:3}}>funds.csv</code></div>
-          <FileUploadZone label="funds.csv" accepted=".csv" onFile={(f)=>{
-            const reader=new FileReader();
-            reader.onload=(e)=>{
-              try{
-                const rows=parseCSV(e.target.result);
-                const parsed=rows.filter(r=>r["Fund Name"]&&r["Fund Name"]!=="Totals").map(r=>({
-                  name:r["Fund Name"]?.trim(),code:r["Fund Code"]?.trim(),
-                  appropriation:parseFloat(r["Appropriation"]?.replace(/[$,]/g,""))||0,
-                  expenditure:parseFloat(r["Expenditure"]?.replace(/[$,]/g,""))||0,
-                  encumbrance:parseFloat(r["Encumbrance"]?.replace(/[$,]/g,""))||0,
-                  freeBalance:parseFloat(r["Free Balance"]?.replace(/[$,]/g,""))||0,
-                }));
-                onFundsUpdate(parsed);
-                onUpdateTimestamp(new Date());
-                alert(`✅ Loaded ${parsed.length} fund records`);
-              }catch(err){alert("Error parsing file: "+err.message);}
-            };
-            reader.readAsText(f);
-          }}/>
-        </div>
-        <div style={card}>
-          <div style={{fontSize:13,fontWeight:600,color:TEXT,marginBottom:4}}>Last Month Circs</div>
-          <div style={{fontSize:11,color:MUTED,marginBottom:14}}>Upload updated <code style={{background:BORDER,padding:"1px 4px",borderRadius:3}}>Circs_LastMonth.csv</code></div>
-          <FileUploadZone label="Circs_LastMonth.csv" accepted=".csv" onFile={(f)=>{
-            const reader=new FileReader();
-            reader.onload=(e)=>{
-              try{
-                const lines=e.target.result.trim().split("\n")
-                const parsed=[];
-                for(let i=4;i<lines.length;i++){
-                  const vals=lines[i].split(",").map(v=>v.trim().replace(/"/g,""));
-                  if(!vals[0]) continue;
-                  const getBranch=(loc)=>{for(const b of BRANCHES){if(loc.startsWith(b))return b;}return "External Borrowers";};
-                  parsed.push({location:vals[0],pct:parseFloat(vals[1])||0,qty:parseInt(vals[2])||0,changePrevYr:parseFloat(vals[3])||0,changePrevMo:parseFloat(vals[4])||0,prevYrQty:parseInt(vals[5])||0,prevMoQty:parseInt(vals[6])||0,branch:getBranch(vals[0])});
-                }
-                onLastMonthUpdate(parsed);
-                onUpdateTimestamp(new Date());
-                alert(`✅ Loaded ${parsed.length} circulation records`);
-              }catch(err){alert("Error: "+err.message);}
-            };
-            reader.readAsText(f);
-          }}/>
-        </div>
-        <div style={card}>
-          <div style={{fontSize:13,fontWeight:600,color:TEXT,marginBottom:4}}>YTD Circs</div>
-          <div style={{fontSize:11,color:MUTED,marginBottom:14}}>Upload updated <code style={{background:BORDER,padding:"1px 4px",borderRadius:3}}>Circs_YTD.csv</code></div>
-          <FileUploadZone label="Circs_YTD.csv" accepted=".csv" onFile={(f)=>{
-            const reader=new FileReader();
-            reader.onload=(e)=>{
-              try{
-                const lines=e.target.result.trim().split("\n")
-                const parsed=[];
-                for(let i=4;i<lines.length;i++){
-                  const vals=lines[i].split(",").map(v=>v.trim().replace(/"/g,""));
-                  if(!vals[0]) continue;
-                  const getBranch=(loc)=>{for(const b of BRANCHES){if(loc.startsWith(b))return b;}return "External Borrowers";};
-                  parsed.push({location:vals[0],pct:parseFloat(vals[1])||0,qty:parseInt(vals[2])||0,branch:getBranch(vals[0])});
-                }
-                onYtdUpdate(parsed);
-                onUpdateTimestamp(new Date());
-                alert(`✅ Loaded ${parsed.length} YTD records`);
-              }catch(err){alert("Error: "+err.message);}
-            };
-            reader.readAsText(f);
-          }}/>
+      <SectionHeader title="Data Management" sub="Dashboard data is pulled live from Google Sheets — update the Sheet to update the dashboard for everyone" />
+
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 24 }}>
+        <div style={{ ...card, flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: TEXT }}>Live Data Status</div>
+          <div style={{ padding: "12px 14px", background: BG, borderRadius: 8 }}>
+            <div style={{ fontSize: 12, color: MUTED, marginBottom: 4 }}>Last refreshed</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: lastUpdated ? PALETTE[4] : "#444c56" }}>
+              {lastUpdated ? fmtDate(lastUpdated) : "Not yet loaded this session"}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button
+              onClick={onRefresh}
+              disabled={loading}
+              style={{ flex: 1, background: PALETTE[0] + "22", border: `1px solid ${PALETTE[0]}44`, color: PALETTE[0], borderRadius: 8, padding: "10px", fontSize: 13, fontWeight: 600, cursor: loading ? "not-allowed" : "pointer", fontFamily: "inherit", opacity: loading ? 0.6 : 1 }}>
+              {loading ? "⏳ Loading..." : "🔄 Refresh Data"}
+            </button>
+            <a
+              href={`https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit`}
+              target="_blank"
+              rel="noreferrer"
+              style={{ flex: 1, background: PALETTE[4] + "22", border: `1px solid ${PALETTE[4]}44`, color: PALETTE[4], borderRadius: 8, padding: "10px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", textDecoration: "none", textAlign: "center", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+              📋 Open Google Sheet
+            </a>
+          </div>
         </div>
       </div>
+
       <div style={card}>
-        <div style={{fontSize:13,fontWeight:600,color:TEXT,marginBottom:12}}>How to Use This Dashboard</div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
-          {[
-            {step:"1",title:"Monthly Fund Update",desc:"Export your Sierra fund report as a CSV with the same column headers as the original funds.csv file, then upload it above. The Fund Balances dashboard updates instantly."},
-            {step:"2",title:"Monthly Circs Update",desc:"Export your circulation reports from Sierra as CSV files (File → Export). Keep the same column structure. Upload each file above to update the Circs dashboards."},
-            {step:"3",title:"Annual Budget Generation",desc:"At the start of each fiscal year, go to the Budget Generator tab. Enter the new total budget figures, click Auto-Calculate, adjust as needed, and download the CSV."},
-            {step:"4",title:"Tips",desc:"The Budget Generator auto-calculation uses 25% circ weighting + 75% prior-year budget weighting — the same methodology as the FY25-26 Rationale sheet. You can override any fund manually."},
-          ].map(({step,title,desc})=>(
-            <div key={step} style={{display:"flex",gap:12,padding:14,background:BG,borderRadius:8}}>
-              <div style={{width:28,height:28,borderRadius:"50%",background:PALETTE[0]+"22",border:`1px solid ${PALETTE[0]}44`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:800,color:PALETTE[0],flexShrink:0}}>{step}</div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: TEXT, marginBottom: 14 }}>Monthly Update Instructions</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+          {steps.map(({ step, title, desc }) => (
+            <div key={step} style={{ display: "flex", gap: 12, padding: 14, background: BG, borderRadius: 8 }}>
+              <div style={{ width: 28, height: 28, borderRadius: "50%", background: PALETTE[0] + "22", border: `1px solid ${PALETTE[0]}44`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800, color: PALETTE[0], flexShrink: 0 }}>{step}</div>
               <div>
-                <div style={{fontSize:13,fontWeight:600,color:TEXT,marginBottom:4}}>{title}</div>
-                <div style={{fontSize:12,color:MUTED,lineHeight:1.5}}>{desc}</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: TEXT, marginBottom: 4 }}>{title}</div>
+                <div style={{ fontSize: 12, color: MUTED, lineHeight: 1.5 }}>{desc}</div>
               </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ ...card, marginTop: 20 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: TEXT, marginBottom: 10 }}>Required Sheet Structure</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
+          {[
+            { tab: "Funds", cols: "Fund Name, Fund Code, Appropriation, Expenditure, Encumbrance, Free Balance" },
+            { tab: "Circs_LastMonth", cols: "Location, Branch, Percent, Qty, Change Prev Year, Change Prev Month, Prev Year Qty, Prev Month Qty" },
+            { tab: "Circs_YTD", cols: "Location, Branch, Percent, Qty" },
+          ].map(({ tab, cols }) => (
+            <div key={tab} style={{ padding: 12, background: BG, borderRadius: 8 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: PALETTE[0], marginBottom: 6 }}>Tab: {tab}</div>
+              <div style={{ fontSize: 11, color: MUTED, lineHeight: 1.6 }}>{cols}</div>
             </div>
           ))}
         </div>
@@ -783,42 +824,64 @@ function AdminUpload({onFundsUpdate,onLastMonthUpdate,onYtdUpdate,onUpdateTimest
 }
 
 // ─── App Shell ────────────────────────────────────────────────────────────────
-const TABS = ["📊 Fund Balances","🔄 Circulation Stats","💰 Budget Generator","⚙️ Data Management"];
-const ADMIN_TABS = [2,3]; // tabs requiring auth
+const TABS = ["📊 Fund Balances", "🔄 Circulation Stats", "💰 Budget Generator", "⚙️ Data Management"];
+const ADMIN_TABS = [2, 3];
 
 export default function App() {
-  const [tab,setTab]=useState(0);
-  const [funds,setFunds]=useState(SEED_FUNDS);
-  const [lastMonthCircs,setLastMonthCircs]=useState(SEED_CIRCS_LAST);
-  const [ytdCircs,setYtdCircs]=useState(SEED_CIRCS_YTD);
-  const [lastUpdated,setLastUpdated]=useState(null);
-  const [adminAuthed,setAdminAuthed]=useState(false);
-  const [pendingTab,setPendingTab]=useState(null);
+  const [tab, setTab] = useState(0);
+  const [funds, setFunds] = useState(SEED_FUNDS);
+  const [lastMonthCircs, setLastMonthCircs] = useState(SEED_CIRCS_LAST);
+  const [ytdCircs, setYtdCircs] = useState(SEED_CIRCS_YTD);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(null);
+  const [adminAuthed, setAdminAuthed] = useState(false);
+  const [pendingTab, setPendingTab] = useState(null);
 
-  const handleTabClick=(i)=>{
-    if(ADMIN_TABS.includes(i)&&!adminAuthed){
-      setPendingTab(i);
-      setTab(i); // show login wall on that tab
-    } else {
-      setTab(i);
+  const fetchAllData = async () => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const [fundsText, lastText, ytdText] = await Promise.all([
+        fetchSheet("Funds"),
+        fetchSheet("Circs_LastMonth"),
+        fetchSheet("Circs_YTD"),
+      ]);
+      const parsedFunds = parseFunds(parseSheetCSV(fundsText));
+      const parsedLast = parseCircsLast(parseSheetCSV(lastText));
+      const parsedYTD = parseCircsYTD(parseSheetCSV(ytdText));
+      if (parsedFunds.length) setFunds(parsedFunds);
+      if (parsedLast.length) setLastMonthCircs(parsedLast);
+      if (parsedYTD.length) setYtdCircs(parsedYTD);
+      setLastUpdated(new Date());
+    } catch (err) {
+      setLoadError(err.message);
+    } finally {
+      setLoading(false);
     }
   };
 
-  const handleLogin=()=>{
-    setAdminAuthed(true);
-    if(pendingTab!=null) setTab(pendingTab);
+  // Auto-fetch on first load
+  useState(() => { fetchAllData(); }, []);
+
+  const handleTabClick = (i) => {
+    if (ADMIN_TABS.includes(i) && !adminAuthed) { setPendingTab(i); setTab(i); }
+    else setTab(i);
   };
+
+  const handleLogin = () => { setAdminAuthed(true); if (pendingTab != null) setTab(pendingTab); };
 
   const isAdminTab = ADMIN_TABS.includes(tab);
   const showLoginWall = isAdminTab && !adminAuthed;
 
-  const fmtDate=(d)=>{
-    if(!d) return null;
-    return d.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric",hour:"2-digit",minute:"2-digit"});
-  };
+  const fmtDate = (d) => d ? d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit" }) : null;
+
+  // Derive period labels from the data
+  const lastMonthTotal = lastMonthCircs.find(r => r.location === "Total");
+  const ytdTotal = ytdCircs.find(r => r.location === "Total");
 
   return (
-    <div style={{minHeight:"100vh",background:BG,color:TEXT,fontFamily:"'DM Sans','Segoe UI',sans-serif"}}>
+    <div style={{ minHeight: "100vh", background: BG, color: TEXT, fontFamily: "'DM Sans','Segoe UI',sans-serif" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap');
         *{box-sizing:border-box;}
@@ -831,40 +894,44 @@ export default function App() {
       `}</style>
 
       {/* Header */}
-      <div style={{borderBottom:`1px solid ${BORDER}`,padding:"14px 32px",display:"flex",alignItems:"center",gap:16,position:"sticky",top:0,background:BG+"ee",backdropFilter:"blur(12px)",zIndex:100}}>
-        <div style={{width:36,height:36,borderRadius:8,background:PALETTE[0]+"33",border:`1px solid ${PALETTE[0]}55`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>📚</div>
+      <div style={{ borderBottom: `1px solid ${BORDER}`, padding: "14px 32px", display: "flex", alignItems: "center", gap: 16, position: "sticky", top: 0, background: BG + "ee", backdropFilter: "blur(12px)", zIndex: 100 }}>
+        <div style={{ width: 36, height: 36, borderRadius: 8, background: PALETTE[0] + "33", border: `1px solid ${PALETTE[0]}55`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20 }}>📚</div>
         <div>
-          <div style={{fontSize:16,fontWeight:800,letterSpacing:"-0.02em"}}>Collection Development Dashboard</div>
-          <div style={{fontSize:11,color:MUTED}}>
-            {lastUpdated
-              ? <span>Last updated: <span style={{color:PALETTE[4]}}>{fmtDate(lastUpdated)}</span></span>
-              : <span style={{color:"#444c56",fontStyle:"italic"}}>Last updated: — (upload files in Data Management to set this date)</span>
+          <div style={{ fontSize: 16, fontWeight: 800, letterSpacing: "-0.02em" }}>Collection Development Dashboard</div>
+          <div style={{ fontSize: 11, color: MUTED }}>
+            {loading
+              ? <span style={{ color: PALETTE[3] }}>⏳ Loading from Google Sheets...</span>
+              : loadError
+                ? <span style={{ color: "#f87171" }}>⚠️ {loadError} — showing cached data</span>
+                : lastUpdated
+                  ? <span>Last updated: <span style={{ color: PALETTE[4], fontWeight: 600 }}>{fmtDate(lastUpdated)}</span></span>
+                  : <span style={{ color: "#444c56", fontStyle: "italic" }}>Connecting to Google Sheets...</span>
             }
           </div>
         </div>
-        <div style={{marginLeft:"auto",display:"flex",gap:4,alignItems:"center"}}>
-          {TABS.map((t,i)=>{
-            const isAdmin=ADMIN_TABS.includes(i);
+        <div style={{ marginLeft: "auto", display: "flex", gap: 4, alignItems: "center" }}>
+          {TABS.map((t, i) => {
+            const isAdmin = ADMIN_TABS.includes(i);
             return (
-              <button key={i} onClick={()=>handleTabClick(i)} style={{padding:"7px 14px",borderRadius:8,border:"none",cursor:"pointer",fontSize:13,fontWeight:600,fontFamily:"inherit",background:tab===i?PALETTE[0]+"22":"transparent",color:tab===i?PALETTE[0]:MUTED,borderBottom:tab===i?`2px solid ${PALETTE[0]}`:"2px solid transparent",transition:"all 0.15s",display:"flex",alignItems:"center",gap:5}}>
-                {t}{isAdmin&&<span style={{fontSize:9,opacity:0.6}}>🔒</span>}
+              <button key={i} onClick={() => handleTabClick(i)} style={{ padding: "7px 14px", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit", background: tab === i ? PALETTE[0] + "22" : "transparent", color: tab === i ? PALETTE[0] : MUTED, borderBottom: tab === i ? `2px solid ${PALETTE[0]}` : "2px solid transparent", transition: "all 0.15s", display: "flex", alignItems: "center", gap: 5 }}>
+                {t}{isAdmin && <span style={{ fontSize: 9, opacity: 0.6 }}>🔒</span>}
               </button>
             );
           })}
-          {adminAuthed&&<button onClick={()=>setAdminAuthed(false)} style={{padding:"5px 10px",borderRadius:6,border:`1px solid ${BORDER}`,background:"transparent",color:MUTED,fontSize:11,cursor:"pointer",fontFamily:"inherit",marginLeft:4}}>Sign out</button>}
+          {adminAuthed && <button onClick={() => setAdminAuthed(false)} style={{ padding: "5px 10px", borderRadius: 6, border: `1px solid ${BORDER}`, background: "transparent", color: MUTED, fontSize: 11, cursor: "pointer", fontFamily: "inherit", marginLeft: 4 }}>Sign out</button>}
         </div>
       </div>
 
       {/* Content */}
-      <div style={{maxWidth:1280,margin:"0 auto",padding:"32px"}}>
+      <div style={{ maxWidth: 1280, margin: "0 auto", padding: "32px" }}>
         {showLoginWall
-          ? <LoginWall onLogin={handleLogin}/>
+          ? <LoginWall onLogin={handleLogin} />
           : <>
-              {tab===0&&<FundsDashboard funds={funds}/>}
-              {tab===1&&<CircsDashboard lastMonth={lastMonthCircs} ytd={ytdCircs} lastMonthLabel="January 2026" ytdLabel="Jan–Feb 2026"/>}
-              {tab===2&&<BudgetGenerator ytdCircs={ytdCircs}/>}
-              {tab===3&&<AdminUpload onFundsUpdate={setFunds} onLastMonthUpdate={setLastMonthCircs} onYtdUpdate={setYtdCircs} onUpdateTimestamp={setLastUpdated}/>}
-            </>
+            {tab === 0 && <FundsDashboard funds={funds} />}
+            {tab === 1 && <CircsDashboard lastMonth={lastMonthCircs} ytd={ytdCircs} lastMonthLabel="Last Month" ytdLabel="Year to Date" />}
+            {tab === 2 && <BudgetGenerator ytdCircs={ytdCircs} />}
+            {tab === 3 && <DataManagement onRefresh={fetchAllData} loading={loading} lastUpdated={lastUpdated} />}
+          </>
         }
       </div>
     </div>
